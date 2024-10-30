@@ -1,0 +1,167 @@
+from mesa import Agent, Model
+from mesa.time import BaseScheduler
+import re
+
+class AgenteCalculadora(Agent):
+    def __init__(self, id_unico, modelo):
+        super().__init__(id_unico, modelo)
+        self.resultado = None
+
+class AgenteParser(AgenteCalculadora):
+    def step(self):
+        if self.model.expresion_actual and not self.model.parseado:
+            self.parsear_expresion(self.model.expresion_actual)
+            self.model.parseado = True
+
+    def parsear_expresion(self, expresion):
+        # Convertir la expresión a notación postfija (RPN)
+        tokens = re.findall(r'[\d.]+|[+\-*/^]', expresion)
+        cola_salida = []
+        pila_operadores = []
+
+        precedencia = {'+': 1, '-': 1, '*': 2, '/': 2, '^': 3}
+
+        i = 0
+        while i < len(tokens):
+            token = tokens[i]
+            if token.replace('.', '').isdigit():
+                cola_salida.append(float(token))
+            elif token in precedencia:
+                while (pila_operadores and pila_operadores[-1] in precedencia and
+                       precedencia[pila_operadores[-1]] >= precedencia[token]):
+                    cola_salida.append(pila_operadores.pop())
+                pila_operadores.append(token)
+            i += 1
+
+        while pila_operadores:
+            cola_salida.append(pila_operadores.pop())
+
+        # Convertir RPN a lista de operaciones
+        self.model.operaciones = []
+        pila = []
+
+        for token in cola_salida:
+            if isinstance(token, float):
+                pila.append(token)
+            else:
+                if len(pila) >= 2:
+                    b = pila.pop()
+                    a = pila.pop()
+                    marcador_resultado = len(self.model.operaciones)
+                    self.model.operaciones.append({
+                        'operador': token,
+                        'operandos': [a, b],
+                        'prioridad': precedencia[token],
+                        'procesado': False,
+                        'resultado': None,
+                        'id': marcador_resultado
+                    })
+                    pila.append(marcador_resultado)
+
+        self.model.orden_operaciones = list(range(len(self.model.operaciones)))
+
+class AgenteEntradaSalida(AgenteCalculadora):
+    def step(self):
+        if self.model.resultado_final is not None:
+            if not hasattr(self, 'resultado_impreso'):
+                self.resultado_impreso = True
+                self.model.running = False
+
+class AgenteOperacion(AgenteCalculadora):
+    def __init__(self, id_unico, modelo, tipo_operacion):
+        super().__init__(id_unico, modelo)
+        self.tipo_operacion = tipo_operacion
+
+    def realizar_operacion(self, a, b):
+        if isinstance(a, int) and a < len(self.model.operaciones):
+            a = self.model.operaciones[a]['resultado']
+        if isinstance(b, int) and b < len(self.model.operaciones):
+            b = self.model.operaciones[b]['resultado']
+
+        if a is None or b is None:
+            return None
+
+        if self.tipo_operacion == '+':
+            return a + b
+        elif self.tipo_operacion == '-':
+            return a - b
+        elif self.tipo_operacion == '*':
+            return a * b
+        elif self.tipo_operacion == '/':
+            return a / b if b != 0 else None
+        elif self.tipo_operacion == '^':
+            return a ** b
+        return None
+
+    def step(self):
+        if not self.model.parseado:
+            return
+
+        for op_id in self.model.orden_operaciones:
+            op = self.model.operaciones[op_id]
+            if not op['procesado'] and op['operador'] == self.tipo_operacion:
+                resultado = self.realizar_operacion(op['operandos'][0], op['operandos'][1])
+                if resultado is not None:
+                    op['procesado'] = True
+                    op['resultado'] = resultado
+                    # Si es la última operación, establecer como resultado final
+                    if op_id == self.model.orden_operaciones[-1]:
+                        self.model.resultado_final = resultado
+                break
+
+class ModeloCalculadora(Model):
+    def __init__(self):
+        super().__init__()
+        self.schedule = BaseScheduler(self)
+
+        # Estado del modelo
+        self.expresion_actual = None
+        self.operaciones = []
+        self.orden_operaciones = []
+        self.parseado = False
+        self.resultado_final = None
+
+        # Crear agentes
+        self.agente_parser = AgenteParser("parser", self)
+        self.agente_entrada_salida = AgenteEntradaSalida("io", self)
+        self.agente_suma = AgenteOperacion("suma", self, '+')
+        self.agente_resta = AgenteOperacion("resta", self, '-')
+        self.agente_multiplicacion = AgenteOperacion("multiplicacion", self, '*')
+        self.agente_division = AgenteOperacion("division", self, '/')
+        self.agente_potencia = AgenteOperacion("potencia", self, '^')
+
+        # Agregar agentes al scheduler en orden de precedencia
+        self.schedule.add(self.agente_parser)
+        self.schedule.add(self.agente_potencia)
+        self.schedule.add(self.agente_multiplicacion)
+        self.schedule.add(self.agente_division)
+        self.schedule.add(self.agente_suma)
+        self.schedule.add(self.agente_resta)
+        self.schedule.add(self.agente_entrada_salida)
+
+    def step(self):
+        self.schedule.step()
+
+def calcular_expresion(expresion):
+    modelo = ModeloCalculadora()
+    modelo.expresion_actual = expresion
+
+    while modelo.resultado_final is None:
+        modelo.step()
+
+    return modelo.resultado_final
+
+# Pruebas
+if __name__ == "__main__":
+    expresiones_test = [
+        "2/2 + 5 * 5 + 1",  # Debe dar 27
+        "2 + 3 * 4 - 5",    # Debe dar 9
+        "10 / 2 + 3",       # Debe dar 8
+        "2 ^ 3 + 4",        # Debe dar 12
+        "3 * 4 + 2 * 3"    # Debe dar 18
+        
+    ]
+
+    for expr in expresiones_test:
+        resultado = calcular_expresion(expr)
+        print(f"El resultado de {expr} es: {resultado}")
